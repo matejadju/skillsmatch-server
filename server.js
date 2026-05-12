@@ -10,10 +10,14 @@ const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ 
+    status: 'ok',
+    hasKey: !!LIVEKIT_API_KEY,
+    hasSecret: !!LIVEKIT_API_SECRET
+  });
 });
 
-app.post('/token', (req, res) => {
+app.post('/token', async (req, res) => {
   const { roomName, identity } = req.body;
 
   if (!roomName || !identity) {
@@ -32,9 +36,12 @@ app.post('/token', (req, res) => {
       canSubscribe: true,
     });
 
-    return res.json({ token: at.toJwt() });
+    const token = await at.toJwt(); // ← async!
+
+    return res.json({ token: token });
   } catch (e) {
-    return res.status(500).json({ error: 'Token generacija neuspješna' });
+    console.error(e);
+    return res.status(500).json({ error: e.message });
   }
 });
 
