@@ -10,15 +10,9 @@ app.use(express.json());
 // ─── ENV ────────────────────────────────────────────────────────────────────
 const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY;
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
-const LIVEKIT_WS_URL     = process.env.LIVEKIT_WS_URL; // wss://your.livekit.server
+const LIVEKIT_WS_URL     = process.env.LIVEKIT_WS_URL;
 
 // ─── Firebase Admin init ─────────────────────────────────────────────────────
-// Render.com: env varijable ne podržavaju dobro višelinijski JSON,
-// pa koristimo base64 enkodiran service account.
-//
-// Lokalno generiši string:
-//   base64 -i serviceAccountKey.json | tr -d '\n'
-// Pa dodaj kao FIREBASE_SERVICE_ACCOUNT_B64 u Render dashboard.
 const serviceAccount = JSON.parse(
   Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_B64, 'base64').toString('utf8')
 );
@@ -37,8 +31,6 @@ async function createToken(roomName, identity) {
 }
 
 // ─── Helper: pošalji FCM data-only push ─────────────────────────────────────
-// VAŽNO: data-only (bez "notification" ključa) + priority high
-// → garantuje isporuku čak i kada je app ubijen
 async function sendCallPush(fcmToken, payload) {
   const message = {
     token: fcmToken,
@@ -46,19 +38,20 @@ async function sendCallPush(fcmToken, payload) {
       type:          'incoming_call',
       roomName:      payload.roomName,
       callerName:    payload.callerName,
-      callerToken:   payload.callerToken, // LiveKit token za callera (za display)
+      callerToken:   payload.callerToken,
       receiverToken: payload.receiverToken,
       liveKitUrl:    LIVEKIT_WS_URL,
       callId:        payload.callId,
+      isVideoCall:   String(payload.isVideoCall ?? false),
     },
     android: {
       priority: 'high',
-      ttl:      30000, // 30s — ako za 30s nije primljeno, brisati
+      ttl:      30000,
     },
     apns: {
       headers: {
         'apns-priority': '10',
-        'apns-push-type': 'voip', // iOS: mora biti voip za CallKit
+        'apns-push-type': 'voip',
       },
     },
   };
@@ -77,7 +70,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Postojeći endpoint — ostavljen nepromijenjen
 app.post('/token', async (req, res) => {
   const { roomName, identity } = req.body;
   if (!roomName || !identity) {
@@ -93,35 +85,34 @@ app.post('/token', async (req, res) => {
 });
 
 // ─── Novi endpoint: initiate call ────────────────────────────────────────────
-// Body: { callerIdentity, receiverIdentity, receiverFcmToken, callerName }
+// Body: { callerIdentity, receiverIdentity, receiverFcmToken, callerName, isVideoCall }
 app.post('/call/initiate', async (req, res) => {
-  const { callerIdentity, receiverIdentity, receiverFcmToken, callerName } = req.body;
+  // ✅ FIX: čitamo isVideoCall iz request body
+  const { callerIdentity, receiverIdentity, receiverFcmToken, callerName, isVideoCall } = req.body;
 
   if (!callerIdentity || !receiverIdentity || !receiverFcmToken) {
     return res.status(400).json({ error: 'callerIdentity, receiverIdentity i receiverFcmToken su obavezni' });
   }
 
   try {
-    // Oba učesnika dijele istu sobu
     const callId   = `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const roomName = `room_${callId}`;
 
-    // Generiši tokene za oba
     const [callerToken, receiverToken] = await Promise.all([
       createToken(roomName, callerIdentity),
       createToken(roomName, receiverIdentity),
     ]);
 
-    // Pošalji push primaocu
+    // ✅ FIX: proslijeđujemo isVideoCall u sendCallPush
     await sendCallPush(receiverFcmToken, {
       callId,
       roomName,
-      callerName:    callerName || callerIdentity,
+      callerName:  callerName || callerIdentity,
       callerToken,
       receiverToken,
+      isVideoCall: isVideoCall ?? true, // default true ako nije poslano
     });
 
-    // Vrati calleru sve što mu treba za ConnectScreen
     return res.json({
       callId,
       roomName,
@@ -134,13 +125,8 @@ app.post('/call/initiate', async (req, res) => {
   }
 });
 
-// ─── Novi endpoint: answer / decline (opcionalni signaling) ──────────────────
-// Ako koristiš LiveKit Data Channels za signaling, ovi endpointi nisu nužni.
-// Korisni su ako trebaš obavijestiti callera server-side (npr. log, timeout).
-
 app.post('/call/answer', async (req, res) => {
   const { callId, receiverIdentity } = req.body;
-  // Ovdje možeš: notifikovati callera da je poziv prihvaćen, pokrenuti timer, itd.
   console.log(`Call ${callId} answered by ${receiverIdentity}`);
   return res.json({ status: 'answered', callId });
 });
@@ -148,7 +134,6 @@ app.post('/call/answer', async (req, res) => {
 app.post('/call/decline', async (req, res) => {
   const { callId, callerFcmToken } = req.body;
 
-  // Opcionalno: pošalji push calleru da je poziv odbijen
   if (callerFcmToken) {
     await admin.messaging().send({
       token: callerFcmToken,
@@ -166,9 +151,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 
-  // Render free tier spušta server nakon 15min neaktivnosti.
-  // Ovo ga pinga svako 14 minuta da ostane budan.
-  // RENDER_EXTERNAL_URL je automatski dostupan na Render platformi.
   const SELF_URL = process.env.RENDER_EXTERNAL_URL;
   if (SELF_URL) {
     setInterval(() => {
